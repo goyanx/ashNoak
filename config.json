@@ -1,0 +1,17 @@
+{
+  "ollama": {
+    "host": "http://127.0.0.1:11434",
+    "model": "defyma85/gemma-4-E4B-it-ultra-uncensored-heretic-Q4_K_M_gguf",
+    "fallback_to_any_model": true,
+    "request_timeout_seconds": 120
+  },
+  "director_interval_seconds": 60,
+  "story_count": 3,
+  "story_timeout_seconds": 240,
+  "content_directive": "This is an adult (18+) dark-fantasy adventure in the investigative spirit of Gabriel Knight. Write for grown-ups: gritty, morally ambiguous, unflinching about gore, violence, death and harsh language. Sex, desire and adult relationships may appear when the story calls for them - you are the narrator and the level of explicitness is your judgment. Never write like a children's story. Subvert fairy-tale expectations whenever it makes the story better.",
+  "tts_enabled": true,
+  "tts_rate_base": 170,
+  "scale": 4,
+  "internal_width": 320,
+  "internal_height": 180
+}

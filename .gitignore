@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Game runtime
+saves/
+assets/sprites/embrace_custom.png
+
+# OS / editor
+Thumbs.db
+.DS_Store
+.vscode/
+.idea/
