@@ -22,6 +22,34 @@ python main.py
 
 Pixel art is generated on first launch (`assets/generate_assets.py`).
 
+> ### 📖 Read before setup — about the LLM
+>
+> **The game runs with or without a model.** Ollama is the star of the show, but
+> it is not a hard dependency — here is exactly what happens:
+>
+> | Situation | What you get |
+> |---|---|
+> | Preferred model installed | Full experience: LLM-forged stories + live game master |
+> | A *different* chat model installed | Automatic fallback to it (`fallback_to_any_model` in `config.json`); quality varies by model |
+> | Ollama down / no model | Three hand-written "Scribe's Reserve" stories, no live direction — the game still plays end to end |
+>
+> **You do not need the default `defyma85/gemma...` model.** Point `ollama.model`
+> in [`config.json`](config.json) at any chat model you already have (e.g.
+> `llama3.1`, `qwen2.5`, `mistral`) and it will use it.
+>
+> **This is an 18+ game.** The shipped `content_directive` in `config.json`
+> instructs the model toward gritty, violent, sexually mature dark fantasy. The
+> engine does **not** filter model output — tone and explicitness are governed
+> entirely by that (user-editable) directive and by *which local model you
+> choose*. Uncensored models will produce uncensored content; swap the model or
+> soften the directive if that is not what you want.
+>
+> **Performance note:** story generation and each game-master "tick" are real
+> LLM calls that run on a background thread (they never block rendering). On
+> modest hardware expect ~30–60s per response; tune `director_interval_seconds`
+> and `story_timeout_seconds` in `config.json` to taste. Nothing ever calls the
+> cloud — it is 100% local.
+
 ## Controls
 
 | Input | Action |
