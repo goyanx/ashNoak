@@ -6,6 +6,8 @@
     "request_timeout_seconds": 120
   },
   "director_interval_seconds": 60,
+  "director_memory_limit": 48,
+  "trace_log": true,
   "story_count": 3,
   "story_timeout_seconds": 240,
   "content_directive": "This is an adult (18+) dark-fantasy adventure in the investigative spirit of Gabriel Knight. Write for grown-ups: gritty, morally ambiguous, unflinching about gore, violence, death and harsh language. Sex, desire and adult relationships may appear when the story calls for them - you are the narrator and the level of explicitness is your judgment. Never write like a children's story. Subvert fairy-tale expectations whenever it makes the story better.",

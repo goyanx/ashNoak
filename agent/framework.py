@@ -11,6 +11,8 @@ import re
 from collections import deque
 from dataclasses import dataclass, field
 
+from .trace import TRACE
+
 
 @dataclass
 class Tool:
@@ -106,18 +108,29 @@ class Agent:
                 f"CURRENT OBSERVATION:\n{observation}\n\n"
                 "Respond with your JSON array of tool calls now."},
         ]
-        raw = self.client.chat(messages, json_format=False, temperature=0.9)
+        raw = self.client.chat(messages, json_format=False, temperature=0.9,
+                               tag=self.name)
         data = extract_json(raw)
         if isinstance(data, dict):  # single call or {"calls": [...]}
             data = data.get("calls", [data])
         if not isinstance(data, list):
+            # distinguish "model returned garbage" from "model chose to do nothing"
+            TRACE.log("agent_step", agent=self.name, outcome="parse_failed",
+                      raw_chars=len(raw) if raw else 0)
             return []
         calls = []
+        rejected = []
         for item in data:
             if not isinstance(item, dict):
+                rejected.append(item)
                 continue
             name = item.get("tool") or item.get("name")
             args = item.get("args") or item.get("arguments") or {}
             if name in self.tools and isinstance(args, dict):
                 calls.append({"tool": name, "args": args})
+            else:
+                rejected.append(item)
+        TRACE.log("agent_step", agent=self.name, outcome="ok",
+                  calls=calls[:5], rejected=rejected,
+                  overflow=max(0, len(calls) - 5))
         return calls[:5]

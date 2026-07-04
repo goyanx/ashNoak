@@ -3,6 +3,8 @@
 Layout: dialogue box along the TOP (so it never covers the actors),
 Darkside-Detective-style bottom bar with inventory/stats/objective, and a
 centered choice panel when the Director offers dialogue options."""
+import queue
+
 import pygame
 
 from .settings import IH, IW
@@ -43,25 +45,33 @@ def wrap(font, text, width):
 
 
 class DialogueBox:
-    """Top-of-screen dialogue. Typewriter reveal, TTS on line start."""
+    """Top-of-screen dialogue. Typewriter reveal, TTS on line start.
+
+    Long text is never cut: push() paginates it into pages of MAX_LINES
+    wrapped lines, and the pages play out one after another (a » marker
+    shows when a line continues on the next page)."""
     CPS = 42.0
     HOLD = 2.4
+    MAX_LINES = 3
 
     def __init__(self, fonts, speaker_tts):
         self.fonts = fonts
         self.tts = speaker_tts
         self.queue = []
-        self.current = None
+        self.current = None   # (speaker, page_text, continues_next_page)
         self.shown = 0.0
         self.hold_t = 0.0
 
     def push(self, speaker, text):
-        self.queue.append((speaker, text))
+        lines = wrap(self.fonts.small, text, IW - 26)
+        for i in range(0, len(lines), self.MAX_LINES):
+            page = " ".join(lines[i:i + self.MAX_LINES])
+            self.queue.append((speaker, page, i + self.MAX_LINES < len(lines)))
 
     def skip(self):
         if not self.current:
             return
-        _, text = self.current
+        text = self.current[1]
         if self.shown < len(text):
             self.shown = len(text)
         else:
@@ -72,9 +82,9 @@ class DialogueBox:
             self.current = self.queue.pop(0)
             self.shown = 0.0
             self.hold_t = 0.0
-            self.tts.say(*self.current)
+            self.tts.say(self.current[0], self.current[1])
         if self.current:
-            _, text = self.current
+            text = self.current[1]
             if self.shown < len(text):
                 self.shown = min(len(text), self.shown + self.CPS * dt)
             else:
@@ -92,10 +102,11 @@ class DialogueBox:
     def draw(self, surf):
         if not self.current:
             return
-        speaker, text = self.current
-        lines = wrap(self.fonts.small, text[:int(self.shown)], IW - 26)[:3]
+        speaker, text, more = self.current
+        lines = wrap(self.fonts.small, text[:int(self.shown)], IW - 26)[:self.MAX_LINES]
         name = SPEAKER_NAMES.get(speaker, speaker.upper()[:14])
-        h = 8 + (11 if name else 0) + max(1, len(wrap(self.fonts.small, text, IW - 26)[:3])) * 10
+        h = 8 + (11 if name else 0) + max(1, len(wrap(
+            self.fonts.small, text, IW - 26)[:self.MAX_LINES])) * 10
         box = pygame.Surface((IW - 8, h), pygame.SRCALPHA)
         box.fill((10, 12, 22, 215))
         pygame.draw.rect(box, (90, 100, 130), box.get_rect(), 1)
@@ -107,6 +118,8 @@ class DialogueBox:
         for line in lines:
             box.blit(self.fonts.text(line, (230, 230, 220)), (6, y))
             y += 10
+        if more and self.shown >= len(text):
+            box.blit(self.fonts.text("»", (216, 168, 50)), (box.get_width() - 10, h - 11))
         surf.blit(box, (4, 4))
 
 
@@ -163,6 +176,81 @@ class ChoicePanel:
                       (r.x + 2, r.y + 3))
 
 
+class Console:
+    """Quake-style drop-down console for talking to the Director out of
+    character. Toggled with ` / ~; owns the keyboard while open."""
+    H = 106
+
+    def __init__(self, fonts):
+        self.fonts = fonts
+        self.open = False
+        self.input = ""
+        self.lines = []   # pre-wrapped (color, text) display lines
+        self.scroll = 0   # how many lines we are scrolled up from the bottom
+        self._inbox = queue.Queue()  # posts from worker threads
+
+    def post(self, text, color=(200, 205, 215)):
+        """Thread-safe log: queue the text; the game loop pumps it in."""
+        self._inbox.put((text, color))
+
+    def pump(self):
+        """Main thread, once per frame: move posted lines into the log."""
+        while True:
+            try:
+                text, color = self._inbox.get_nowait()
+            except queue.Empty:
+                return
+            self.log(text, color)
+
+    def log(self, text, color=(200, 205, 215)):
+        for chunk in str(text).split("\n"):
+            for line in wrap(self.fonts.small, chunk, IW - 16) or [""]:
+                self.lines.append((color, line))
+        self.lines = self.lines[-400:]
+        self.scroll = 0
+
+    def toggle(self):
+        self.open = not self.open
+        self.input = ""
+
+    def rows(self):
+        return (self.H - 16) // 9
+
+    def key(self, ev):
+        """Handle a KEYDOWN while open. Returns submitted text or None."""
+        if ev.key == pygame.K_ESCAPE:
+            self.open = False
+        elif ev.key == pygame.K_RETURN:
+            text, self.input = self.input.strip(), ""
+            return text or None
+        elif ev.key == pygame.K_BACKSPACE:
+            self.input = self.input[:-1]
+        elif ev.key == pygame.K_PAGEUP:
+            self.scroll = min(max(0, len(self.lines) - self.rows()), self.scroll + 3)
+        elif ev.key == pygame.K_PAGEDOWN:
+            self.scroll = max(0, self.scroll - 3)
+        elif ev.unicode and ev.unicode.isprintable() and len(self.input) < 240:
+            self.input += ev.unicode
+        return None
+
+    def draw(self, surf):
+        if not self.open:
+            return
+        panel = pygame.Surface((IW, self.H), pygame.SRCALPHA)
+        panel.fill((8, 10, 18, 235))
+        pygame.draw.line(panel, (216, 168, 50), (0, self.H - 1), (IW, self.H - 1))
+        rows = self.rows()
+        start = max(0, len(self.lines) - rows - self.scroll)
+        y = 2
+        for color, line in self.lines[start:start + rows]:
+            panel.blit(self.fonts.text(line, color), (4, y))
+            y += 9
+        caret = "_" if pygame.time.get_ticks() // 400 % 2 else " "
+        panel.blit(self.fonts.text("] " + self.input[-56:] + caret, (235, 225, 200)),
+                   (4, self.H - 12))
+        surf.blit(panel, (0, 0))
+
+
 class BottomBar:
     """HP, stats, beat, inventory, hover label — the whole cockpit."""
 
@@ -210,8 +298,8 @@ class BottomBar:
                 ch = player.inventory[i].name[:1].upper()
                 surf.blit(self.fonts.text(ch, (230, 220, 190)), (r.x + 4, r.y + 2))
         # director lamp
-        col = {"thinking": (250, 210, 60), "error": (200, 70, 60)}.get(
-            director_status, (90, 160, 90))
+        col = {"thinking": (250, 210, 60), "summoned": (250, 160, 40),
+               "error": (200, 70, 60)}.get(director_status, (90, 160, 90))
         pygame.draw.rect(surf, col, (IW - 8, bar.y + 4, 4, 4))
         # hover label (what the cursor is over / selected item hint)
         if hover_label:

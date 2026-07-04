@@ -10,13 +10,14 @@ import threading
 import time
 
 from .framework import Agent, Tool
+from .trace import TRACE
 
 DIRECTOR_TOOLS = [
     Tool("say", "Speak a line of dialogue, shown on screen and voiced by TTS.",
          {"speaker": "knight|princess|dragon|narrator, or a minor NPC's name",
-          "text": "the line, under 220 chars"}),
+          "text": "the line, under 500 chars"}),
     Tool("narrate", "Narrator prose over the scene — describe, foreshadow, react.",
-         {"text": "the prose, under 220 chars"}),
+         {"text": "the prose, under 500 chars"}),
     Tool("offer_choices", "Present the player 2-4 dialogue/action choices. Their pick comes back to you as an event.",
          {"prompt": "what Kael is responding to", "options": "array of 2-4 short first-person options"}),
     Tool("give_item", "Put an item in Kael's inventory (clue, key, weapon, trophy).",
@@ -35,7 +36,7 @@ DIRECTOR_TOOLS = [
          {"who": "princess|dragon", "place": "here|away"}),
     Tool("intimate_scene", "Stage lovemaking between Kael and a partner: the room dims, "
          "an embrace plays out in pixels, and your `text` narration carries the moment.",
-         {"partner": "princess, or a named NPC", "text": "the narration, under 220 chars"}),
+         {"partner": "princess, or a named NPC", "text": "the narration, under 500 chars"}),
     Tool("harm", "Wound someone (story consequence).", {"target": "knight|princess", "amount": "1-4"}),
     Tool("heal", "Restore hit points.", {"target": "knight|princess", "amount": "1-5"}),
 ]
@@ -99,7 +100,8 @@ class Director:
             title=story["title"], promise=story["promise"],
             beats=" | ".join(f"{i+1}. {b}" for i, b in enumerate(story["beats"])),
             payoff=story["payoff"], dragon_role=story["dragon_role"])
-        self.agent = Agent("director", persona, DIRECTOR_TOOLS, self.client)
+        self.agent = Agent("director", persona, DIRECTOR_TOOLS, self.client,
+                           memory_limit=int(self.cfg.get("director_memory_limit", 48)))
         self._stop.clear()
         self._nudge.clear()
         self._last_tick = time.monotonic()  # opening lines cover the first minute
@@ -117,6 +119,7 @@ class Director:
         """Feed a gameplay event into the agent's memory (game thread)."""
         if self.agent:
             self.agent.memory.add(event_text)
+            TRACE.log("event", text=event_text)
 
     def request_tick(self, reason, force=False):
         """Event nudge (beat done, near-death, boss). Debounced to 15 s
@@ -124,7 +127,40 @@ class Director:
         if force or time.monotonic() - self._last_tick >= 15:
             if self.agent:
                 self.agent.memory.add(f"URGENT: {reason}")
+            if not self._busy:
+                self.status = "summoned"
             self._nudge.set()
+
+    def converse(self, text, callback):
+        """Out-of-character console chat with the director. Runs on its own
+        thread; `callback(reply_text)` fires when the LLM answers. The
+        message also enters the agent's memory so the next tick can act."""
+        if not self.agent:
+            callback("(no story is running)")
+            return
+        self.agent.memory.add(
+            f'CONSOLE: the player spoke to you directly, out of character: "{text}"')
+
+        def work():
+            messages = [
+                {"role": "system", "content":
+                    self.agent.persona + "\n\nThe player has opened a debug console "
+                    "to talk to YOU, the game master, out of character. Answer in "
+                    "plain text (no JSON, no tool calls), under 100 words. If they "
+                    "give an instruction, acknowledge it and carry it into the "
+                    "story on your next turn."},
+                {"role": "user", "content":
+                    f"RECENT EVENTS:\n{self.agent.memory.render()}\n\n"
+                    "CURRENT GAME STATE:\n"
+                    f"{self.snapshot_provider() if self.snapshot_provider else '?'}\n\n"
+                    f"PLAYER (console): {text}"},
+            ]
+            reply = self.client.chat(messages, temperature=0.7, num_predict=300,
+                                     tag="console")
+            callback((reply or "").strip() or "(silence — the LLM did not answer)")
+            self._nudge.set()  # let any instruction reach the story promptly
+
+        threading.Thread(target=work, daemon=True).start()
 
     def drain(self):
         """Game thread: pop all pending tool calls."""
@@ -140,11 +176,14 @@ class Director:
     def _run(self):
         while not self._stop.is_set():
             timeout = max(0.5, self.interval - (time.monotonic() - self._last_tick))
-            self._nudge.wait(timeout=timeout)
+            nudged = self._nudge.wait(timeout=timeout)
             self._nudge.clear()
             if self._stop.is_set():
                 return
             if time.monotonic() - self._last_tick < 5 or self._busy:
+                if nudged:  # don't drop the request (this ate F5 presses):
+                    self._nudge.set()  # keep it armed and retry shortly
+                    time.sleep(1.0)
                 continue
             self._tick()
 
@@ -167,6 +206,7 @@ class Director:
             self.status = f"acted ({len(calls)} calls)" if calls else "idle"
         except Exception as e:  # never let the director kill the game
             print("[director] tick failed:", e)
+            TRACE.log("director_error", error=str(e))
             self.status = "error"
         finally:
             self._last_tick = time.monotonic()

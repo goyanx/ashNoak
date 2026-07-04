@@ -8,6 +8,7 @@ import copy
 import threading
 
 from .framework import extract_json
+from .trace import TRACE
 
 THEMES = ("forest", "castle", "volcano")
 SPEAKERS = ("knight", "princess", "dragon", "narrator")
@@ -189,6 +190,7 @@ class StoryForge:
                 if self._gen == gen:
                     self.slots[i] = {"status": status, "story": story}
             print(f"[forge] slot {i}: {status} — {story['title']}")
+            TRACE.log("forge_slot", slot=i, status=status, title=story["title"])
 
     def _forge_one(self, i, used_titles):
         variety = ""
@@ -199,7 +201,8 @@ class StoryForge:
         for _attempt in range(2):
             raw = self.client.chat(
                 [{"role": "user", "content": prompt}],
-                json_format=True, temperature=1.0, num_predict=1200, timeout=self.timeout)
+                json_format=True, temperature=1.0, num_predict=1200,
+                timeout=self.timeout, tag="forge")
             story = _valid_story(extract_json(raw))
             if story:
                 return story

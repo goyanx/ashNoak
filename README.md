@@ -59,7 +59,9 @@ Pixel art is generated on first launch (`assets/generate_assets.py`).
 | Left-click | walk / search prop / talk / attack foe / take exit / pick choice |
 | Right-click | examine what's under the cursor |
 | Click inventory slot | arm an item, then click a target to use it on |
-| E | skip dialogue line |
+| E | skip dialogue page (long text flows across pages — `»` means more) |
+| Tab (hold) | show the story beats achieved so far |
+| ` / ~ | drop-down console — talk to the director LLM out of character |
 | F5 | force a director tick now |
 | F6 / F7 | quicksave / load (C on the title screen continues a save) |
 | M | mute/unmute TTS |
@@ -69,6 +71,29 @@ Pixel art is generated on first launch (`assets/generate_assets.py`).
 Saves land in `saves/quicksave.json` and include the Director's memory of
 your deeds, so the game master picks up the thread instead of restarting the
 tale. One slot, Sierra-style — save before doing something brave.
+
+Every run also writes a session trace to `logs/session_<stamp>.jsonl` — one
+JSON object per line covering every LLM exchange (prompt, response, latency),
+every parsed/rejected tool call, every gameplay deed and director action.
+Feed a session file to an LLM or a notebook to study pacing and failure
+rates. Disable with `"trace_log": false` in `config.json`. The trace contains
+full prompts and model output, so it inherits your content settings — it
+stays local and out of git.
+
+## The director console
+
+Press <code>`</code> (tilde) for a Quake-style drop-down console. The world
+pauses; whatever you type goes to the director LLM **out of character** — it
+answers in the console and folds instructions into the story on its next
+tick ("bring Maren to my room", "make the next fight harder"). Every tool
+call the director makes is echoed there live. Built-in commands:
+
+| Command | Shows |
+|---|---|
+| `/events` | the director's rolling memory of your deeds |
+| `/state` | the game-state snapshot the LLM sees every tick |
+| `/beats` | story beats achieved (same as holding Tab) |
+| `/help` | this list |
 
 ## How a run works
 
@@ -96,8 +121,9 @@ square frames laid side by side (frame width = sheet height), any frame
 count, played on a loop under the firelight veil. The shipped art stays at
 an embrace; what you put in the override file is up to you.
 
-The green/yellow lamp in the bottom-right corner is the Director: yellow while
-the model is thinking. Blood stays where it was spilled.
+The lamp in the bottom-right corner is the Director: green idle, yellow while
+the model is thinking, orange when a tick has been summoned (F5 or an urgent
+event), red on error. Blood stays where it was spilled.
 
 ## Configuration — `config.json`
 
@@ -105,6 +131,8 @@ the model is thinking. Blood stays where it was spilled.
 |---|---|
 | `ollama.model` | preferred model; falls back to any installed chat model |
 | `director_interval_seconds` | director tick cadence (default 60) |
+| `director_memory_limit` | events the director remembers between ticks (default 48) |
+| `trace_log` | write `logs/session_*.jsonl` session traces (default true) |
 | `story_count` | outlines forged at boot (min 3) |
 | `content_directive` | narrative tone instructions sent with every LLM call — edit to taste; the shipped default is gritty adult dark-fantasy |
 | `tts_enabled` / `tts_rate_base` | voice output |

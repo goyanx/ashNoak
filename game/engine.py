@@ -15,14 +15,15 @@ import pygame
 from agent.director import Director
 from agent.ollama_client import OllamaClient
 from agent.storyforge import StoryForge
+from agent.trace import TRACE
 from agent.tts import Speaker
 
 from . import assets as assets_mod
 from .actors import Actor, Foe, Item, Player
 from .rooms import FLOOR_TOP, NPC_EXAMINE, Stage
 from .settings import CONFIG, FPS, IH, IW, ROOT, SCALE
-from .ui import (BAR_H, BottomBar, ChoicePanel, DialogueBox, Fonts, StorySelect,
-                 draw_cursor, wrap)
+from .ui import (BAR_H, BottomBar, ChoicePanel, Console, DialogueBox, Fonts,
+                 StorySelect, draw_cursor, wrap)
 
 BEATS = 5
 ENEMY_KINDS = ("raider", "wolf", "cultist")
@@ -43,6 +44,8 @@ KEY_HELP = [
     ("  inventory", "arm an item, then click its target"),
     ("KEYS", ""),
     ("  E", "skip the current dialogue line"),
+    ("  TAB (hold)", "the story beats so far"),
+    ("  ` / ~", "console — talk to the game master"),
     ("  F5", "force the game master to act now"),
     ("  F6", "save the story (quicksave)"),
     ("  F7", "load the saved story"),
@@ -74,8 +77,10 @@ class Game:
         self.screen = pygame.Surface((IW, IH))
         self.clock = pygame.time.Clock()
         pygame.mouse.set_visible(False)
+        pygame.key.set_repeat(320, 45)  # held keys repeat (console typing)
         self.fonts = Fonts()
         self.art = assets_mod.load_all()
+        TRACE.start(ROOT, CONFIG.get("trace_log", True))
 
         self.sfx = {
             "slash": synth(900, 300, 0.09),
@@ -93,6 +98,9 @@ class Game:
         self.forge.start()
         self.director = Director(self.client, CONFIG)
         self.select = StorySelect(self.fonts)
+        self.console = Console(self.fonts)
+        self.console.log("Director console. Type to speak with the game master; "
+                         "/help for commands.", (140, 145, 165))
 
         self.state = "menu"
         self.paused = False
@@ -110,7 +118,7 @@ class Game:
                 if ev.type == pygame.QUIT:
                     self.quit()
                 elif ev.type == pygame.KEYDOWN:
-                    self.keydown(ev.key)
+                    self.keydown(ev)
                 elif ev.type == pygame.MOUSEBUTTONDOWN:
                     if ev.button == 1:
                         click = True
@@ -118,7 +126,10 @@ class Game:
                         rclick = True
             self.mouse = (pygame.mouse.get_pos()[0] // SCALE,
                           pygame.mouse.get_pos()[1] // SCALE)
-            if self.state == "play" and not self.paused:
+            self.console.pump()
+            if self.console.open:
+                pass  # the console owns input; the world holds its breath
+            elif self.state == "play" and not self.paused:
                 self.update_play(dt, click, rclick)
             elif click:
                 self.menu_click()
@@ -127,11 +138,22 @@ class Game:
             pygame.display.flip()
 
     def quit(self):
+        TRACE.log("session_end")
         self.director.stop()
         pygame.quit()
         sys.exit(0)
 
-    def keydown(self, key):
+    def keydown(self, ev):
+        key = ev.key
+        if key == pygame.K_BACKQUOTE or ev.unicode in ("`", "~"):
+            self.console.toggle()
+            return
+        if self.console.open:
+            text = self.console.key(ev)
+            if text:
+                self.console.log("] " + text, (235, 225, 200))
+                self.console_command(text)
+            return
         if key == pygame.K_m:
             self.speaker.toggle_mute()
         if self.state == "menu":
@@ -170,9 +192,45 @@ class Game:
                 self.dialogue.skip()
             elif key == pygame.K_F5:
                 self.director.request_tick("the player demands the story move", force=True)
+                self.console.log("* F5 — director tick requested", (140, 145, 165))
         elif self.state == "epilogue":
             if key in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_ESCAPE):
                 self.state = "menu"
+
+    def console_command(self, text):
+        low = text.lower().strip()
+        if low in ("/help", "help", "?"):
+            self.console.log("Type anything — it goes to the director LLM, which "
+                             "answers here and folds instructions into the story.")
+            self.console.log("/events  what the director remembers (its rolling memory)")
+            self.console.log("/state   the game-state snapshot it sees every tick")
+            self.console.log("/beats   story beats (same as holding TAB)")
+            return
+        if low == "/events":
+            events = list(self.director.agent.memory.events) if self.director.agent else []
+            self.console.log(f"-- director memory ({len(events)} events) --", (216, 168, 50))
+            for e in events or ["(nothing yet)"]:
+                self.console.log("  " + str(e), (150, 155, 175))
+            return
+        if low == "/state":
+            self.console.log("-- snapshot sent to the LLM each tick --", (216, 168, 50))
+            self.console.log(self.snapshot_text, (150, 155, 175))
+            return
+        if low == "/beats":
+            if self.story is None:
+                self.console.log("(no story is running)", (200, 120, 80))
+                return
+            for i, b in enumerate(self.story["beats"]):
+                mark = "DONE" if i < self.beat else ("NOW " if i == self.beat else "... ")
+                self.console.log(f"{mark} {i + 1}. {b if i <= self.beat else '(not yet revealed)'}",
+                                 (110, 160, 110) if i < self.beat else (150, 155, 175))
+            return
+        if self.director.agent is None:
+            self.console.log("(no story is running — start one first)", (200, 120, 80))
+            return
+        self.console.log("(the director considers...)", (140, 145, 165))
+        self.director.converse(
+            text, lambda reply: self.console.post("DIRECTOR: " + reply, (216, 168, 50)))
 
     def menu_click(self):
         if self.state == "menu":
@@ -193,6 +251,7 @@ class Game:
 
     def start_story(self, story):
         self.story = story
+        TRACE.log("story_start", story=story)
         spr = self.art["sprites"]
         self.stage = Stage(story["theme"], self.art, seed=hash(story["title"]) & 0xFFFF)
         self.player = Player(spr["knight"], 60, FLOOR_TOP + 28)
@@ -266,6 +325,7 @@ class Game:
             with open(SAVE_PATH, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=1)
             self.dialogue.push("narrator", "Saved. The ink dries.")
+            TRACE.log("save", beat=self.beat, room=self.stage.room.name)
         except OSError as e:
             self.dialogue.push("narrator", f"The scribe's hand failed: {e}")
 
@@ -324,6 +384,7 @@ class Game:
         self.paused = False
         self.dialogue.push("narrator",
                            f"The story takes you back. {self.stage.room.name}.")
+        TRACE.log("load", beat=self.beat, room=self.stage.room.name)
         return True
 
     def _restore_foe(self, spr, f):
@@ -422,12 +483,19 @@ class Game:
 
     def dispatch(self, call):
         tool, a = call["tool"], call["args"]
+        if tool in ("say", "narrate"):
+            gist = f'{a.get("speaker", "narrator")}: {str(a.get("text", ""))[:90]}'
+        else:
+            gist = " ".join(f"{k}={v}" for k, v in a.items())[:90]
+        self.console.log(f"* {tool} {gist}", (110, 120, 150))
+        TRACE.log("dispatch", tool=tool, args=a, beat=self.beat,
+                  room=self.stage.room.name)
         try:
             if tool == "say":
                 self.dialogue.push(str(a.get("speaker", "narrator")).lower()[:16],
-                                   str(a.get("text", ""))[:220])
+                                   str(a.get("text", ""))[:600])
             elif tool == "narrate":
-                self.dialogue.push("narrator", str(a.get("text", ""))[:220])
+                self.dialogue.push("narrator", str(a.get("text", ""))[:600])
             elif tool == "offer_choices":
                 opts = a.get("options", [])
                 if isinstance(opts, str):
@@ -485,6 +553,7 @@ class Game:
                     self.blood_burst(target.x, target.y - 10, 6)
         except (ValueError, TypeError) as e:
             print("[dispatch] bad args for", tool, a, e)
+            TRACE.log("dispatch_error", tool=tool, args=a, error=str(e))
 
     def start_intimacy(self, a):
         alive = [f for f in self.foes.get(self.stage.current, []) if not f.dead]
@@ -500,7 +569,7 @@ class Game:
         self.pending = None
         self.player.stop()
         self.princess.stop()
-        text = str(a.get("text", ""))[:220]
+        text = str(a.get("text", ""))[:600]
         if text:
             self.dialogue.push("narrator", text)
 
@@ -892,6 +961,7 @@ class Game:
             self.draw_epilogue(s)
         if self.state != "play":
             draw_cursor(s, getattr(self, "mouse", (0, 0)), "normal", self.fonts)
+        self.console.draw(s)
 
     def draw_menu(self, s):
         s.fill((14, 12, 28))
@@ -997,9 +1067,39 @@ class Game:
                 y += 11
             saved = "quicksave present" if os.path.exists(SAVE_PATH) else "no save yet"
             s.blit(self.fonts.text(saved, (110, 120, 150)), (24, y + 2))
+        if not self.console.open and pygame.key.get_pressed()[pygame.K_TAB]:
+            self.draw_beats(s)
         mode = "item" if sel is not None else ("hot" if self.hover_label else "normal")
         item_name = self.player.inventory[sel].name if sel is not None else None
         draw_cursor(s, self.mouse, mode, self.fonts, item_name)
+
+    def draw_beats(self, s):
+        """Held-TAB overlay: the story's beats, achieved / current / unrevealed."""
+        veil = pygame.Surface((IW, IH), pygame.SRCALPHA)
+        veil.fill((8, 8, 16, 210))
+        s.blit(veil, (0, 0))
+        s.blit(self.fonts.text("THE STORY SO FAR", (216, 168, 50), big=True), (20, 6))
+        y = 26
+        for i, beat in enumerate(self.story["beats"]):
+            if i < self.beat:
+                mark, col = "DONE", (110, 160, 110)
+            elif i == self.beat:
+                mark, col = "NOW", (216, 168, 50)
+            else:
+                mark, col = "...", (80, 86, 110)
+            text = beat if i <= self.beat else "(not yet revealed)"
+            s.blit(self.fonts.text(mark, col), (20, y))
+            for line in wrap(self.fonts.small, f"{i + 1}. {text}", IW - 78)[:2]:
+                s.blit(self.fonts.text(line, col), (52, y))
+                y += 10
+            y += 3
+        if self.beat >= BEATS:
+            col = (110, 160, 110) if self.payoff_done else (230, 220, 190)
+            for line in wrap(self.fonts.small, "PAYOFF: " + self.story["payoff"], IW - 78)[:2]:
+                s.blit(self.fonts.text(line, col), (52, y))
+                y += 10
+        else:
+            s.blit(self.fonts.text("PAYOFF: ...", (80, 86, 110)), (52, y))
 
     def draw_epilogue(self, s):
         s.fill((10, 10, 20))
