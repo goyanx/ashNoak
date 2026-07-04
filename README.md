@@ -1,5 +1,7 @@
 # Ash & Oath — knight / princess / dragon
 
+![Ash & Oath — a dialogue choice in the Castle Gates, the game master narrating a dragon-marked locket](docs/screenshot.png)
+
 A 90s-style **pixel point-and-click adventure** where a **local LLM is the
 game master**. Darkside Detective looks, Quest for Glory play (adventure +
 stats + fights), Gabriel Knight mood. Stories are generated in the background
