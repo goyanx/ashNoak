@@ -49,6 +49,17 @@ class OllamaClient:
                         print(f"[ollama] preferred model not installed; falling back to {self._model}")
             return self._model
 
+    def chat_models(self):
+        """Installed models minus embedding models — the pickable list."""
+        return [n for n in self.installed_models() if "embed" not in n.lower()]
+
+    def set_model(self, name):
+        """Pin the active model explicitly (from the in-game picker)."""
+        with self._lock:
+            self._model = name
+            self.preferred = name
+            self.last_error = None
+
     def available(self):
         return self.resolve_model() is not None
 

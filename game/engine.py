@@ -23,7 +23,7 @@ from .actors import Actor, Foe, Item, Player
 from .rooms import FLOOR_TOP, NPC_EXAMINE, Stage
 from .settings import CONFIG, FPS, IH, IW, ROOT, SCALE
 from .ui import (BAR_H, BottomBar, ChoicePanel, Console, DialogueBox, Fonts,
-                 StorySelect, draw_cursor, wrap)
+                 ModelSelect, StorySelect, draw_cursor, wrap)
 
 BEATS = 5
 ENEMY_KINDS = ("raider", "wolf", "cultist")
@@ -98,6 +98,7 @@ class Game:
         self.forge.start()
         self.director = Director(self.client, CONFIG)
         self.select = StorySelect(self.fonts)
+        self.models = ModelSelect(self.fonts)
         self.console = Console(self.fonts)
         self.console.log("Director console. Type to speak with the game master; "
                          "/help for commands.", (140, 145, 165))
@@ -159,10 +160,23 @@ class Game:
         if self.state == "menu":
             if key in (pygame.K_RETURN, pygame.K_SPACE):
                 self.state = "select"
+            elif key == pygame.K_l:
+                self.open_models()
             elif key in (pygame.K_c, pygame.K_F7):
                 self.load_game()
             elif key == pygame.K_ESCAPE:
                 self.quit()
+        elif self.state == "models":
+            if key in (pygame.K_UP, pygame.K_w):
+                self.models.move(-1)
+            elif key in (pygame.K_DOWN, pygame.K_s):
+                self.models.move(1)
+            elif key == pygame.K_r:
+                self.open_models()
+            elif key in (pygame.K_RETURN, pygame.K_SPACE):
+                self.choose_model(self.models.selected())
+            elif key == pygame.K_ESCAPE:
+                self.state = "menu"
         elif self.state == "select":
             if key in (pygame.K_UP, pygame.K_w):
                 self.select.index = (self.select.index - 1) % 3
@@ -234,7 +248,14 @@ class Game:
 
     def menu_click(self):
         if self.state == "menu":
-            self.state = "select"
+            if pygame.Rect(0, IH - 24, IW, 24).collidepoint(self.mouse):
+                self.open_models()
+            else:
+                self.state = "select"
+        elif self.state == "models":
+            chosen = self.models.mouse(self.mouse, True)
+            if chosen:
+                self.choose_model(chosen)
         elif self.state == "select":
             for i in range(3):
                 if pygame.Rect(12, 28 + i * 47, IW - 24, 44).collidepoint(self.mouse):
@@ -246,6 +267,37 @@ class Game:
                         self.select.index = i
         elif self.state == "epilogue":
             self.state = "menu"
+
+    # ================================================================ model picker
+
+    def open_models(self):
+        """Fetch the installed chat models and show the picker (blocks briefly
+        on the Ollama query — a deliberate menu action)."""
+        self.models.load(self.client.chat_models(), self.client.resolve_model())
+        self.state = "models"
+
+    def choose_model(self, name):
+        if not name:
+            return
+        self.client.set_model(name)
+        self.persist_model(name)
+        self.models.active = name
+        self.forge.start()  # re-forge the outlines with the new game master
+        self.state = "select"
+
+    def persist_model(self, name):
+        """Write the choice back to config.json so it survives a restart."""
+        path = os.path.join(ROOT, "config.json")
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            data.setdefault("ollama", {})["model"] = name
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+                f.write("\n")
+            CONFIG.setdefault("ollama", {})["model"] = name
+        except (OSError, ValueError) as e:
+            print("[config] could not persist model:", e)
 
     # ================================================================ story setup
 
@@ -953,6 +1005,8 @@ class Game:
         s = self.screen
         if self.state == "menu":
             self.draw_menu(s)
+        elif self.state == "models":
+            self.models.draw(s)
         elif self.state == "select":
             self.select.draw(s, self.forge.snapshot())
         elif self.state == "play":
@@ -976,6 +1030,8 @@ class Game:
         model = self.client.resolve_model()
         status = f"LLM: {model.split(':')[0][:34]}" if model else "LLM offline — scribe's reserve stories"
         s.blit(self.fonts.text(status, (110, 160, 110) if model else (200, 120, 80)), (8, IH - 22))
+        hint = self.fonts.text("L — change model", (150, 150, 175))
+        s.blit(hint, (IW - hint.get_width() - 6, IH - 22))
         if int(t * 2) % 2:
             s.blit(self.fonts.text("CLICK OR PRESS ENTER", (230, 225, 210)), (108, 150))
         if os.path.exists(SAVE_PATH):

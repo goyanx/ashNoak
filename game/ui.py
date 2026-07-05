@@ -323,6 +323,80 @@ def draw_cursor(surf, pos, mode, fonts, item_name=None):
         surf.blit(fonts.text(item_name[:12], col), (x + 5, y + 3))
 
 
+class ModelSelect:
+    """Title-screen picker for which installed Ollama model directs the game."""
+    ROW_H = 13
+    Y0 = 42
+    VISIBLE = 9
+
+    def __init__(self, fonts):
+        self.fonts = fonts
+        self.index = 0
+        self.models = []
+        self.active = None
+        self.message = ""
+
+    def load(self, models, active):
+        self.models = list(models)
+        self.active = active
+        self.message = "" if models else "No models found — is Ollama running? R to retry."
+        self.index = max(0, self.models.index(active)) if active in self.models else 0
+
+    def move(self, delta):
+        if self.models:
+            self.index = (self.index + delta) % len(self.models)
+
+    def _scroll(self):
+        if self.index < self.VISIBLE:
+            return 0
+        return min(self.index - self.VISIBLE + 1, max(0, len(self.models) - self.VISIBLE))
+
+    def row_rects(self):
+        """Visible (model_index, rect) pairs for mouse hit-testing."""
+        start = self._scroll()
+        out = []
+        for row, i in enumerate(range(start, min(start + self.VISIBLE, len(self.models)))):
+            out.append((i, pygame.Rect(12, self.Y0 + row * self.ROW_H, IW - 24, self.ROW_H - 1)))
+        return out
+
+    def mouse(self, pos, click):
+        """Returns chosen model name on a click of the highlighted row, else None."""
+        for i, r in self.row_rects():
+            if r.collidepoint(pos):
+                if click and i == self.index:
+                    return self.models[i]
+                if click:
+                    self.index = i
+        return None
+
+    def selected(self):
+        return self.models[self.index] if self.models else None
+
+    def draw(self, surf):
+        surf.fill((16, 14, 30))
+        surf.blit(self.fonts.text("CHOOSE THE GAME MASTER", (216, 168, 50), big=True), (56, 8))
+        surf.blit(self.fonts.text("the local LLM that directs your story", (140, 145, 165)), (74, 26))
+        if self.message:
+            surf.blit(self.fonts.text(self.message, (200, 120, 80)), (12, self.Y0))
+        for i, r in self.row_rects():
+            name = self.models[i]
+            sel = i == self.index
+            is_active = name == self.active
+            if sel:
+                pygame.draw.rect(surf, (34, 32, 58), r)
+                pygame.draw.rect(surf, (216, 168, 50), r, 1)
+            mark = "* " if is_active else "  "
+            col = (235, 230, 215) if sel else ((150, 200, 150) if is_active else (170, 175, 195))
+            label = mark + name
+            if self.fonts.small.size(label)[0] > r.w - 8:
+                while label and self.fonts.small.size(label + "…")[0] > r.w - 8:
+                    label = label[:-1]
+                label += "…"
+            surf.blit(self.fonts.text(label, col), (r.x + 4, r.y + 2))
+        surf.blit(self.fonts.text("UP/DOWN select   ENTER use (re-forges stories)   "
+                                  "R refresh   ESC back", (140, 145, 165)), (12, 168))
+
+
 class StorySelect:
     def __init__(self, fonts):
         self.fonts = fonts
