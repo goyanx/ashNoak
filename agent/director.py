@@ -29,7 +29,13 @@ DIRECTOR_TOOLS = [
     Tool("set_objective", "Set the current beat's on-screen objective.",
          {"kind": "slay|search|talk|story", "value": "count for slay/search; npc name for talk; ignored for story",
           "text": "objective text shown to the player"}),
-    Tool("advance_beat", "Declare the current beat resolved; the way forward opens.", {}),
+    Tool("advance_beat", "Declare the current beat resolved; the way forward opens. "
+         "Call this the moment a beat's dramatic business is done — a truth landed, a "
+         "place reached, a fight won — so the story keeps moving.", {}),
+    Tool("end_story", "End the game NOW with a closing line. Call this once the payoff "
+         "has been paid and the tale is genuinely over — the ending can come through "
+         "your words alone, no fight required. Rolls the epilogue.",
+         {"text": "the final narration the player reads, under 400 chars"}),
     Tool("spawn_encounter", "Start a fight in the current room.",
          {"kind": "raider|wolf|cultist", "count": "1-4"}),
     Tool("move_actor", "Bring a cast member into the current room, or send them away.",
@@ -63,10 +69,18 @@ Game-mastering rules:
   offer_choices() so the player steers the conversation.
 - When the player searches or uses things, reward curiosity: narrate what it
   MEANS, give_item clues, or call skill_check for risky acts.
-- Serve the CURRENT beat; escalate pressure as beats advance. Call
-  advance_beat when the beat's business feels done — that unlocks new rooms.
-- On the final beat, stage the payoff in the lair per the dragon's role and
-  pay the promise.
+- You are a DRAMA MANAGER, not a passive narrator: the story must always be
+  MOVING toward the payoff. Every tick, either deepen the current beat or push
+  past it. Tension should rise beat by beat — later beats hit harder, cost more.
+- Serve the CURRENT beat, then RESOLVE it. A beat is a few exchanges, not a
+  holding pattern. Call advance_beat the moment its business is done — a truth
+  landed, a place reached, a fight won. The snapshot tells you the beat's age;
+  if it says STALLING, you have dawdled — force something to happen or
+  advance_beat immediately. Reaching a NEW place is itself a cue to escalate.
+- On the final beat, stage the payoff in the lair per the dragon's role and pay
+  the promise. When the promise is truly paid, call end_story with a closing
+  line — the ending may come through your words alone; you do not need a fight
+  to finish. Do not leave the tale hanging: land it.
 - Desire is part of adult stories. When the story has EARNED it — trust built,
   a beat of stillness, both willing — you may call intimate_scene; its
   narration register is your judgment per the content directive. Usually let

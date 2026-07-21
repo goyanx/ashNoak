@@ -29,11 +29,19 @@ BEATS = 5
 ENEMY_KINDS = ("raider", "wolf", "cultist")
 DEFAULT_OBJECTIVES = [
     ("talk", "princess", "Speak with Maren"),
-    ("search", 3, "Search this place for answers"),
+    ("reach", 1, "Press on — the road is the only way through"),
     ("slay", 3, "Blood has been called. Answer it"),
     ("search", 2, "Dig deeper. Something is missing"),
     ("slay", 4, "They know. They are coming"),
 ]
+# Drama-manager pacing (ms): the story must always be moving. A beat that
+# lingers past STALL nudges the director to push; past HARD_CAP it advances
+# itself so play never deadlocks. MIN_BEAT keeps auto-completion from blitzing
+# through a beat before its dialogue lands. PAYOFF_CAP guarantees an ending.
+BEAT_MIN_MS = 8_000
+BEAT_STALL_MS = int(float(CONFIG.get("beat_stall_seconds", 45)) * 1000)
+BEAT_HARD_CAP_MS = int(float(CONFIG.get("beat_hard_cap_seconds", 170)) * 1000)
+PAYOFF_CAP_MS = int(float(CONFIG.get("payoff_hard_cap_seconds", 150)) * 1000)
 STAT_NAMES = ("vigor", "wit", "presence")
 SAVE_PATH = os.path.join(ROOT, "saves", "quicksave.json")
 
@@ -323,6 +331,14 @@ class Game:
         self.talked_this_beat = set()
         self.payoff_done = False
         self.payoff_talk_t = None
+        self.payoff_started_t = None
+        self.epilogue_text = None
+        # drama-manager pacing clocks (ms). progress_t resets on any real
+        # story movement; beat_started_t bounds how long one beat may run.
+        now = pygame.time.get_ticks()
+        self.beat_started_t = now
+        self.progress_t = now
+        self.stall_nudged = False
         self.pending = None      # deferred click action, runs on arrival
         self.selected_item = None
         self.hover_label = ""
@@ -418,6 +434,12 @@ class Game:
         self.beat_searches = int(data.get("beat_searches", 0))
         self.talked_this_beat = set(data.get("talked", []))
         self.payoff_talk_t = pygame.time.get_ticks() if data.get("payoff_talked") else None
+        # restart the pacing clocks fresh so a resumed beat gets its full run
+        now = pygame.time.get_ticks()
+        self.beat_started_t = now
+        self.progress_t = now
+        self.stall_nudged = False
+        self.payoff_started_t = now if self.beat >= BEATS else None
         spr = self.art["sprites"]
         self.foes = {}
         for idx, lst in data.get("foes", {}).items():
@@ -488,6 +510,11 @@ class Game:
             return self.beat_searches >= o["value"]
         if o["kind"] == "talk":
             return str(o["value"]).lower() in self.talked_this_beat
+        if o["kind"] == "reach":
+            # arriving at the newest-unlocked room resolves the beat: places
+            # push the story forward. (frontier 0 = the opening room; skip it.)
+            frontier = self.stage.unlocked - 1
+            return frontier > 0 and self.stage.current >= frontier
         if o["kind"] == "slay_dragon":
             return any(f.kind == "dragon" and f.dead
                        for fl in self.foes.values() for f in fl)
@@ -497,6 +524,47 @@ class Game:
                     and pygame.time.get_ticks() - self.payoff_talk_t > 25000)
         return False  # "story": only advance_beat resolves it
 
+    def _beat_age(self):
+        return pygame.time.get_ticks() - self.beat_started_t
+
+    def mark_progress(self):
+        """Something moved the story: reset the stall clock so the drama
+        manager only intervenes when play has genuinely gone quiet."""
+        self.progress_t = pygame.time.get_ticks()
+        self.stall_nudged = False
+
+    def check_progress(self):
+        """Drama-manager heartbeat (per frame). Guarantees the story keeps
+        moving: nudge a stalled director, hard-advance a beat that overstays,
+        and force an ending if the payoff drags. Paused while a scene or a
+        choice owns the screen."""
+        if self.scene or self.choices.open or self.state != "play":
+            return
+        now = pygame.time.get_ticks()
+        if self.beat >= BEATS:
+            # payoff failsafe: the tale MUST end, by fight or by word
+            if not self.payoff_done and self.payoff_started_t is not None \
+                    and now - self.payoff_started_t > PAYOFF_CAP_MS:
+                self.director.remember(
+                    "The payoff has run long. End it now — through the fight if it "
+                    "is joined, otherwise through words: call end_story.")
+                self.finish_payoff()
+            return
+        idle = now - self.progress_t
+        if idle > BEAT_HARD_CAP_MS:
+            # nothing has moved for too long — advance ourselves so play never
+            # deadlocks (the director gets to voice the new beat right after)
+            self.console.log("* drama manager: beat overstayed — advancing",
+                             (150, 120, 90))
+            self.complete_beat()
+        elif idle > BEAT_STALL_MS and not self.stall_nudged:
+            self.stall_nudged = True
+            self.director.remember(
+                f"The story has STALLED on beat {self.beat + 1} "
+                f"({self.story['beats'][self.beat]}). Push it: reveal something, "
+                "raise the stakes, or call advance_beat.")
+            self.director.request_tick("the beat has stalled", force=True)
+
     def complete_beat(self, via_director=False):
         self.sfx["beat"].play()
         if self.beat < BEATS:
@@ -505,6 +573,8 @@ class Game:
                 f"Beat {self.beat + 1} resolved ({src}): {self.story['beats'][self.beat]}")
             self.beat += 1
             self.stage.unlocked = min(len(self.stage.rooms), self.beat + 1)
+            self.beat_started_t = pygame.time.get_ticks()
+            self.mark_progress()
             self.set_default_objective()
             if self.beat >= BEATS:
                 self.enter_payoff()
@@ -516,20 +586,25 @@ class Game:
 
     def enter_payoff(self):
         self.stage.unlocked = len(self.stage.rooms)
+        self.payoff_started_t = pygame.time.get_ticks()
         self.director.remember("FINAL PHASE: stage the payoff in the lair. "
-                               f"Payoff to deliver: {self.story['payoff']}")
+                               f"Payoff to deliver: {self.story['payoff']}. "
+                               "When it is paid, call end_story to land the ending.")
         self.director.request_tick("the payoff phase has begun", force=True)
         self.dragon_room = len(self.stage.rooms) - 1
         if self.story["dragon_role"] == "villain":
             self.dragon_villain_pending = True
         self.dialogue.push("narrator", "The last door is open. Something old is waiting behind it.")
 
-    def finish_payoff(self):
+    def finish_payoff(self, text=None):
+        if self.payoff_done:
+            return
         self.payoff_done = True
         self.director.remember("The payoff was delivered. The story is over.")
         self.state = "epilogue"
         self.director.stop()
-        self.speaker.say("narrator", self.story["payoff"])
+        self.epilogue_text = (text or "").strip() or self.story["payoff"]
+        self.speaker.say("narrator", self.epilogue_text)
 
     # ================================================================ director dispatch
 
@@ -567,7 +642,7 @@ class Game:
                 self.do_skill_check(a)
             elif tool == "set_objective":
                 kind = a.get("kind")
-                if kind in ("slay", "search", "talk", "story") and self.beat < BEATS:
+                if kind in ("slay", "search", "talk", "reach", "story") and self.beat < BEATS:
                     value = a.get("value", 3)
                     if kind in ("slay", "search"):
                         value = max(1, min(8, int(float(value or 3))))
@@ -575,10 +650,13 @@ class Game:
                                       "text": str(a.get("text", ""))[:80] or "New purpose"}
                     self.beat_kills = self.beat_searches = 0
                     self.talked_this_beat = set()
+                    self.mark_progress()
                     if kind == "slay":
                         self.ensure_foes(value)
             elif tool == "advance_beat":
                 self.complete_beat(via_director=True)
+            elif tool == "end_story":
+                self.finish_payoff(str(a.get("text", "")))
             elif tool == "spawn_encounter":
                 kind = a.get("kind") if a.get("kind") in ENEMY_KINDS else "raider"
                 for _ in range(max(1, min(4, int(float(a.get("count", 2)))))):
@@ -724,8 +802,11 @@ class Game:
         self.update_particles(dt)
         self.dialogue.update(dt)
 
-        if self.objective_complete():
+        # auto-advance on a met objective, but give the beat's dialogue a beat
+        # to land first so the story never blitzes past its own scenes
+        if self.objective_complete() and self._beat_age() >= BEAT_MIN_MS:
             self.complete_beat()
+        self.check_progress()
         self.drain_director()
         self.update_snapshot(room_foes)
 
@@ -821,12 +902,14 @@ class Game:
                 item = self.player.inventory[self.selected_item]
                 self.selected_item = None
                 self.dialogue.push("narrator", f"You try the {item.name} on the {h.kind}...")
+                self.mark_progress()
                 self.director.remember(
                     f"Kael USED the item '{item.name}' on the {h.kind} in {room.name}. "
                     "Decide what happens; narrate it.")
                 self.director.request_tick("an item was used", force=True)
             else:
                 self.beat_searches += 1
+                self.mark_progress()
                 self.dialogue.push("narrator", h.examine_line())
                 self.director.remember(
                     f"Kael searched the {h.kind} in {room.name} "
@@ -835,6 +918,7 @@ class Game:
         elif kind == "npc":
             who = target[1]
             self.talked_this_beat.add(who)
+            self.mark_progress()
             if who == "dragon" and self.beat >= BEATS and self.payoff_talk_t is None:
                 self.payoff_talk_t = pygame.time.get_ticks()
             pretty = "Maren" if who == "princess" else "Vexuragh"
@@ -863,6 +947,7 @@ class Game:
                 self.blood_pool(f.x, f.y, big=(f.kind == "dragon"))
                 self.player.kills += 1
                 self.beat_kills += 1
+                self.mark_progress()
                 label = "Vexuragh" if f.kind == "dragon" else f"a {f.kind}"
                 self.director.remember(f"Kael KILLED {label} in {self.stage.room.name}.")
                 if f.kind == "dragon":
@@ -901,9 +986,15 @@ class Game:
             self.dragon_room = None
             f = self.spawn_foe("dragon")
             f.x, f.y = IW - 60, FLOOR_TOP + 34
+        self.mark_progress()  # travel is momentum: places push the story on
         props = ", ".join(h.kind for h in room.hotspots)
-        self.director.remember(f"Kael entered {room.name} ({room.style}). Props: {props}.")
-        self.director.request_tick("the player entered a new place")
+        frontier = nxt >= self.stage.unlocked - 1 and nxt > 0
+        note = " This is the FRONTIER — a charged place to escalate or resolve the beat." \
+            if frontier else ""
+        self.director.remember(
+            f"Kael entered {room.name} ({room.style}). Props: {props}.{note}")
+        self.director.request_tick("the player entered a new place",
+                                   force=frontier)
 
     def player_died(self):
         self.deaths += 1
@@ -975,10 +1066,26 @@ class Game:
         else:
             beat_txt = "PAYOFF PHASE: " + self.story["payoff"]
             beat_lab = "payoff"
+        frontier = self.stage.unlocked - 1
         prog = {"slay": f"{self.beat_kills}/{o.get('value')}",
                 "search": f"{self.beat_searches}/{o.get('value')}",
                 "talk": f"spoken to: {', '.join(self.talked_this_beat) or 'no one'}",
+                "reach": f"at room {self.stage.current}, frontier is {frontier}",
                 }.get(o.get("kind"), "-")
+        # pacing the director can act on: how long this beat has run, whether it
+        # is stalling, and where we are on the rising arc
+        if self.beat < BEATS:
+            age_s = self._beat_age() // 1000
+            idle_s = (pygame.time.get_ticks() - self.progress_t) // 1000
+            stall = "  STALLING — push it or advance_beat!" if idle_s * 1000 > BEAT_STALL_MS else ""
+            tension = "rising" if self.beat < BEATS - 1 else "CLIMAX — head for the payoff"
+            pacing = (f"Pacing: beat running {age_s}s, {idle_s}s since anything moved."
+                      f"{stall} Arc tension: {tension} (beat {self.beat + 1}/{BEATS}).")
+        else:
+            pay_s = ((pygame.time.get_ticks() - self.payoff_started_t) // 1000
+                     if self.payoff_started_t else 0)
+            pacing = (f"Pacing: PAYOFF running {pay_s}s. Pay the promise and call "
+                      "end_story to land the ending.")
         cast = []
         if self.princess_room == self.stage.current:
             cast.append("Maren")
@@ -997,7 +1104,8 @@ class Game:
             f"WIT {self.player.stats['wit']} PRE {self.player.stats['presence']}\n"
             f"Inventory: {inv}\n"
             f"Bond with Maren: {self.bond}\n"
-            f"Rooms unlocked: {self.stage.unlocked}/{len(self.stage.rooms)}")
+            f"Rooms unlocked: {self.stage.unlocked}/{len(self.stage.rooms)}\n"
+            f"{pacing}")
 
     # ================================================================ drawing
 
@@ -1169,6 +1277,13 @@ class Game:
         s.blit(self.fonts.text("THE PAYOFF", (140, 145, 165)), (20, y)); y += 11
         for line in wrap(self.fonts.small, story["payoff"], IW - 40)[:4]:
             s.blit(self.fonts.text(line, (230, 220, 190)), (20, y)); y += 10
+        y += 8
+        # the director's own closing line, when it chose to end through words
+        closing = getattr(self, "epilogue_text", None)
+        if closing and closing.strip() != story["payoff"].strip():
+            s.blit(self.fonts.text("HOW IT ENDED", (140, 145, 165)), (20, y)); y += 11
+            for line in wrap(self.fonts.small, closing, IW - 40)[:4]:
+                s.blit(self.fonts.text(line, (200, 205, 220)), (20, y)); y += 10
         y += 10
         s.blit(self.fonts.text(f"deaths: {self.deaths}   kills: {self.player.kills}",
                                (150, 150, 170)), (20, y))

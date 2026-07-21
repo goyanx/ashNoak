@@ -1,5 +1,6 @@
 """Walkers for the adventure stage: player, companions, foes. Feet-anchored,
 y-sorted by the engine, movement is click-to-walk."""
+import math
 import random
 from dataclasses import dataclass
 
@@ -18,6 +19,7 @@ class Item:
 class Actor:
     speed = 55.0
     max_hp = 6
+    step_freq = 2.6   # walk-cycle bounces per second (procedural juice)
 
     def __init__(self, frames, x, y, scale=1):
         self.frames = frames
@@ -79,9 +81,11 @@ class Actor:
         if self.attack_t > 0 and "attack" in f:
             return f["attack"]
         if self.moving:
-            key = "walk0" if int(self.anim_t * 7) % 2 else "walk1"
+            # swap feet on each half of the bounce so frame and hop stay in step
+            phase = int(self.anim_t * self.step_freq * 2) % 2
+            key = "walk0" if phase else "walk1"
             if key not in f:  # wolf sheet
-                key = "run0" if int(self.anim_t * 8) % 2 else "run1"
+                key = "run0" if phase else "run1"
             return f.get(key, f.get("idle0", f.get("idle")))
         for key in ("idle0", "idle"):
             if key in f:
@@ -90,13 +94,49 @@ class Actor:
                 return f[key]
         return next(iter(f.values()))
 
+    def _pose(self):
+        """Procedural animation layered on the base frame, feet-anchored:
+        returns (offx, offy, sx, sy). Gives idle breathing, a springy walk
+        with squash/stretch, an attack lunge and a hurt recoil — all from a
+        couple of sines and the existing timers, no extra art. This is what
+        sells the 'alive' pixel look (à la Yes Your Grace)."""
+        t = self.anim_t
+        offx = offy = 0.0
+        sx = sy = 1.0
+        if self.attack_t > 0:
+            p = self.attack_t / 0.25              # 1 -> 0 across the swing
+            offx += self.facing * 5.0 * p         # lunge into the blow
+            sy += 0.12 * p                        # rear up, then settle
+            sx += 0.05 * p
+        elif self.hurt_t > 0:
+            k = self.hurt_t / 0.55
+            offx += math.sin(t * 55.0) * 1.8 * k  # rattled recoil
+            sx += 0.05 * k
+        elif self.moving:
+            step = math.sin(t * self.step_freq * math.tau)
+            a = abs(step)
+            offy -= a * 2.4                        # hop on the push-off
+            sy += (a - 0.5) * 0.07                 # stretch up / squash on plant
+            sx -= (a - 0.5) * 0.07
+            offx += self.facing * 0.6             # a hair of forward lean
+        else:
+            breath = math.sin(t * 1.7)            # slow, calm idle breathing
+            sy += breath * 0.028
+            sx -= breath * 0.020
+            offy -= max(0.0, breath) * 0.6
+        return offx, offy, sx, sy
+
     def draw(self, surf):
         img = self.current_frame()
-        if self.scale != 1:
-            img = pygame.transform.scale_by(img, self.scale)
+        offx, offy, sx, sy = self._pose()
+        w, h = img.get_width(), img.get_height()
+        tw = max(1, int(round(w * self.scale * sx)))
+        th = max(1, int(round(h * self.scale * sy)))
+        if (tw, th) != (w, h):
+            img = pygame.transform.scale(img, (tw, th))  # nearest-neighbour: stays crisp
         if self.facing < 0:
             img = pygame.transform.flip(img, True, False)
-        r = img.get_rect(midbottom=(int(self.x), int(self.y)))
+        r = img.get_rect(midbottom=(int(round(self.x + offx)), int(round(self.y + offy))))
         surf.blit(img, r.topleft)
         return r
 
@@ -147,6 +187,7 @@ class Foe(Actor):
         self.reach = st["reach"]
         self.cool = st["cool"]
         self.swing_t = random.uniform(0.6, 1.4)
+        self.step_freq = {"wolf": 3.8, "dragon": 1.4}.get(kind, 2.6)
 
     def think(self, dt, player):
         """Chase and strike. Returns True on a landed hit attempt."""
