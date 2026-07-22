@@ -26,15 +26,9 @@ DIRECTOR_TOOLS = [
          {"name": "item name"}),
     Tool("skill_check", "Make Kael roll a stat. The engine rolls and you learn the outcome as an event.",
          {"stat": "vigor|wit|presence", "difficulty": "2-9", "reason": "what is being attempted"}),
-    Tool("set_objective", "Set the current beat's on-screen objective.",
-         {"kind": "slay|search|talk|story", "value": "count for slay/search; npc name for talk; ignored for story",
-          "text": "objective text shown to the player"}),
-    Tool("advance_beat", "Declare the current beat resolved; the way forward opens. "
-         "Call this the moment a beat's dramatic business is done — a truth landed, a "
-         "place reached, a fight won — so the story keeps moving.", {}),
-    Tool("end_story", "End the game NOW with a closing line. Call this once the payoff "
-         "has been paid and the tale is genuinely over — the ending can come through "
-         "your words alone, no fight required. Rolls the epilogue.",
+    Tool("end_story", "End the game NOW with a closing line. Only works in the PAYOFF "
+         "phase, once the promise is paid — the ending can come through your words "
+         "alone, no fight required. Rolls the epilogue.",
          {"text": "the final narration the player reads, under 400 chars"}),
     Tool("spawn_encounter", "Start a fight in the current room.",
          {"kind": "raider|wolf|cultist", "count": "1-4"}),
@@ -70,13 +64,15 @@ Game-mastering rules:
 - When the player searches or uses things, reward curiosity: narrate what it
   MEANS, give_item clues, or call skill_check for risky acts.
 - You are a DRAMA MANAGER, not a passive narrator: the story must always be
-  MOVING toward the payoff. Every tick, either deepen the current beat or push
-  past it. Tension should rise beat by beat — later beats hit harder, cost more.
-- Serve the CURRENT beat, then RESOLVE it. A beat is a few exchanges, not a
-  holding pattern. Call advance_beat the moment its business is done — a truth
-  landed, a place reached, a fight won. The snapshot tells you the beat's age;
-  if it says STALLING, you have dawdled — force something to happen or
-  advance_beat immediately. Reaching a NEW place is itself a cue to escalate.
+  MOVING toward the payoff. Tension rises beat by beat — later beats hit
+  harder, cost more.
+- Beats complete ONLY through their TRIGGER — one concrete deed the game
+  engine detects mechanically (the snapshot names it). You cannot advance a
+  beat yourself; your whole craft is STEERING the player into the trigger:
+  hand the named item with give_item (exact name), summon the right cast
+  member with move_actor, start the fight with spawn_encounter, put the
+  pivotal line in front of them with offer_choices. If the snapshot says
+  STALLING, stage the trigger NOW, plainly and directly.
 - On the final beat, stage the payoff in the lair per the dragon's role and pay
   the promise. When the promise is truly paid, call end_story with a closing
   line — the ending may come through your words alone; you do not need a fight

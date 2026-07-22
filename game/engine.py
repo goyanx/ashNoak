@@ -8,13 +8,14 @@ import json
 import math
 import os
 import random
+import re
 import sys
 
 import pygame
 
 from agent.director import Director
 from agent.ollama_client import OllamaClient
-from agent.storyforge import StoryForge
+from agent.storyforge import DEFAULT_TRIGGERS, StoryForge
 from agent.trace import TRACE
 from agent.tts import Speaker
 
@@ -27,21 +28,21 @@ from .ui import (BAR_H, BottomBar, ChoicePanel, Console, DialogueBox, Fonts,
 
 BEATS = 5
 ENEMY_KINDS = ("raider", "wolf", "cultist")
-DEFAULT_OBJECTIVES = [
-    ("talk", "princess", "Speak with Maren"),
-    ("reach", 1, "Press on — the road is the only way through"),
-    ("slay", 3, "Blood has been called. Answer it"),
-    ("search", 2, "Dig deeper. Something is missing"),
-    ("slay", 4, "They know. They are coming"),
-]
-# Drama-manager pacing (ms): the story must always be moving. A beat that
-# lingers past STALL nudges the director to push; past HARD_CAP it advances
-# itself so play never deadlocks. MIN_BEAT keeps auto-completion from blitzing
-# through a beat before its dialogue lands. PAYOFF_CAP guarantees an ending.
+# Drama-manager pacing (ms): the story must always be moving. Each beat has a
+# forged TRIGGER (a concrete deed the engine detects); the beat completes ONLY
+# when it fires. A beat idle past STALL nudges the director to steer toward the
+# trigger; past HARD_CAP the engine STAGES the trigger itself (grants the item,
+# summons the NPC, offers the choice) — it never skips the deed. MIN_BEAT keeps
+# completion from blitzing past dialogue. PAYOFF_CAP guarantees an ending.
 BEAT_MIN_MS = 8_000
 BEAT_STALL_MS = int(float(CONFIG.get("beat_stall_seconds", 45)) * 1000)
 BEAT_HARD_CAP_MS = int(float(CONFIG.get("beat_hard_cap_seconds", 170)) * 1000)
 PAYOFF_CAP_MS = int(float(CONFIG.get("payoff_hard_cap_seconds", 150)) * 1000)
+
+
+def _norm(s):
+    """Lowercased alphanumeric words — fuzzy ground for item/choice matching."""
+    return re.sub(r"[^a-z0-9 ]", "", str(s).lower()).strip()
 STAT_NAMES = ("vigor", "wit", "presence")
 SAVE_PATH = os.path.join(ROOT, "saves", "quicksave.json")
 
@@ -246,6 +247,8 @@ class Game:
                 mark = "DONE" if i < self.beat else ("NOW " if i == self.beat else "... ")
                 self.console.log(f"{mark} {i + 1}. {b if i <= self.beat else '(not yet revealed)'}",
                                  (110, 160, 110) if i < self.beat else (150, 155, 175))
+                if i == self.beat and self.beat < BEATS:
+                    self.console.log(f"     needs: {self._trigger_desc()}", (170, 150, 90))
             return
         if self.director.agent is None:
             self.console.log("(no story is running — start one first)", (200, 120, 80))
@@ -378,6 +381,8 @@ class Game:
             "deaths": self.deaths,
             "beat_kills": self.beat_kills,
             "beat_searches": self.beat_searches,
+            "beat_item_used": self.beat_item_used,
+            "beat_choice_done": self.beat_choice_done,
             "talked": sorted(self.talked_this_beat),
             "payoff_talked": self.payoff_talk_t is not None,
             "foes": {str(idx): [{"kind": f.kind, "hp": f.hp, "x": f.x, "y": f.y}
@@ -412,6 +417,11 @@ class Game:
         self.dialogue.current = None
         self.beat = int(data["beat"])
         self.objective = data["objective"]
+        known = ("talk", "slay", "search", "reach", "item_get", "item_use",
+                 "choice", "slay_dragon", "talk_dragon")
+        if not (isinstance(self.objective, dict) and self.objective.get("kind") in known):
+            # legacy save (pre-trigger objectives): rebuild from the beat's trigger
+            self.set_default_objective()
         self.stage.current = int(data["current"])
         self.stage.unlocked = int(data["unlocked"])
         p = data["player"]
@@ -432,6 +442,8 @@ class Game:
         self.deaths = int(data.get("deaths", 0))
         self.beat_kills = int(data.get("beat_kills", 0))
         self.beat_searches = int(data.get("beat_searches", 0))
+        self.beat_item_used = bool(data.get("beat_item_used"))
+        self.beat_choice_done = bool(data.get("beat_choice_done"))
         self.talked_this_beat = set(data.get("talked", []))
         self.payoff_talk_t = pygame.time.get_ticks() if data.get("payoff_talked") else None
         # restart the pacing clocks fresh so a resumed beat gets its full run
@@ -469,10 +481,48 @@ class Game:
 
     # ================================================================ objectives & beats
 
+    def trigger_for_beat(self, b):
+        """The forged, deterministic completion trigger for beat b."""
+        trigs = (self.story or {}).get("triggers") or []
+        t = trigs[b] if b < len(trigs) and isinstance(trigs[b], dict) else None
+        return t or DEFAULT_TRIGGERS[b % len(DEFAULT_TRIGGERS)]
+
+    def _trigger_desc(self, o=None):
+        """Human line describing what fires the current trigger (for the DM)."""
+        o = o or self.objective or {}
+        k, v = o.get("kind"), o.get("value")
+        return {
+            "talk": f"Kael speaks with {'Vexuragh' if v == 'dragon' else 'Maren'}",
+            "slay": f"Kael cuts down {v} foes",
+            "search": f"Kael searches {v} places here",
+            "reach": "Kael walks into the newest-opened area",
+            "item_get": f"Kael comes to hold the item '{v}' — give_item with that exact name",
+            "item_use": f"Kael uses the item '{v}' on something",
+            "choice": f'the player picks the dialogue choice "{v}" — put it in offer_choices',
+            "slay_dragon": "Vexuragh dies",
+            "talk_dragon": "Kael faces Vexuragh and hears the truth",
+        }.get(k, "the story presses forward")
+
+    def _has_item_like(self, name):
+        return any(self._text_matches(i.name, name) for i in self.player.inventory)
+
+    def _text_matches(self, text, key):
+        """Does free text satisfy the trigger's key line? Normalized
+        containment, or most of the key's meaningful words present."""
+        a, b = _norm(text), _norm(key)
+        if not a or not b:
+            return False
+        if a == b or b in a or a in b:
+            return True
+        words = [w for w in b.split() if len(w) >= 4]
+        return bool(words) and sum(w in a for w in words) >= max(1, (len(words) + 1) // 2)
+
     def set_default_objective(self):
         self.beat_kills = 0
         self.beat_searches = 0
         self.talked_this_beat = set()
+        self.beat_item_used = False
+        self.beat_choice_done = False
         if self.beat >= BEATS:
             if self.story["dragon_role"] == "villain":
                 self.objective = {"kind": "slay_dragon", "value": 1,
@@ -481,10 +531,20 @@ class Game:
                 self.objective = {"kind": "talk_dragon", "value": 1,
                                   "text": "Face Vexuragh. Hear the truth."}
             return
-        kind, value, text = DEFAULT_OBJECTIVES[self.beat % len(DEFAULT_OBJECTIVES)]
+        t = self.trigger_for_beat(self.beat)
+        kind, value = t["type"], t["value"]
+        text = {
+            "talk": f"Speak with {'Vexuragh' if value == 'dragon' else 'Maren'}",
+            "slay": "Blood has been called. Answer it",
+            "search": "Search this place for answers",
+            "reach": "Press on. New ground is open",
+            "item_get": f"Find: {value}",
+            "item_use": f"Use the {value}",
+            "choice": "A choice is coming. Meet it",
+        }.get(kind, "Press forward")
         self.objective = {"kind": kind, "value": value, "text": text}
         if kind == "slay":
-            self.ensure_foes(value)
+            self.ensure_foes(int(value))
 
     def ensure_foes(self, want):
         cur = self.foes.setdefault(self.stage.current, [])
@@ -515,6 +575,12 @@ class Game:
             # push the story forward. (frontier 0 = the opening room; skip it.)
             frontier = self.stage.unlocked - 1
             return frontier > 0 and self.stage.current >= frontier
+        if o["kind"] == "item_get":
+            return self._has_item_like(str(o["value"]))
+        if o["kind"] == "item_use":
+            return self.beat_item_used
+        if o["kind"] == "choice":
+            return self.beat_choice_done
         if o["kind"] == "slay_dragon":
             return any(f.kind == "dragon" and f.dead
                        for fl in self.foes.values() for f in fl)
@@ -522,7 +588,7 @@ class Game:
             # give the Director room to stage the scene after the talk
             return (self.payoff_talk_t is not None
                     and pygame.time.get_ticks() - self.payoff_talk_t > 25000)
-        return False  # "story": only advance_beat resolves it
+        return False  # unknown kind (old save): only staging can move it
 
     def _beat_age(self):
         return pygame.time.get_ticks() - self.beat_started_t
@@ -552,25 +618,65 @@ class Game:
             return
         idle = now - self.progress_t
         if idle > BEAT_HARD_CAP_MS:
-            # nothing has moved for too long — advance ourselves so play never
-            # deadlocks (the director gets to voice the new beat right after)
-            self.console.log("* drama manager: beat overstayed — advancing",
+            # nothing has moved for too long — STAGE the trigger (never skip
+            # the deed): the beat still completes only when it actually fires
+            self.console.log("* drama manager: staging the beat's trigger",
                              (150, 120, 90))
-            self.complete_beat()
+            self.stage_trigger()
+            self.mark_progress()
         elif idle > BEAT_STALL_MS and not self.stall_nudged:
             self.stall_nudged = True
             self.director.remember(
                 f"The story has STALLED on beat {self.beat + 1} "
-                f"({self.story['beats'][self.beat]}). Push it: reveal something, "
-                "raise the stakes, or call advance_beat.")
+                f"({self.story['beats'][self.beat]}). Its trigger has not fired: "
+                f"{self._trigger_desc()}. Steer the player into it NOW.")
             self.director.request_tick("the beat has stalled", force=True)
 
-    def complete_beat(self, via_director=False):
+    def stage_trigger(self):
+        """Engine-side assist when the beat overstays: put the trigger's
+        opportunity directly in front of the player. Deterministic — the deed
+        itself still has to happen; nothing is skipped."""
+        o = self.objective or {}
+        k, v = o.get("kind"), o.get("value")
+        if k == "talk":
+            if v == "dragon":
+                self.dragon_room = self.stage.current
+                self.dialogue.push("narrator", "A shadow crosses the ground. Vexuragh has found you.")
+            else:
+                self.princess_room = self.stage.current
+                self.princess.x, self.princess.y = self.player.x + 40, self.player.y
+                self.princess.stop()
+                self.dialogue.push("narrator", "Maren comes looking for you. Words are owed.")
+        elif k in ("slay", "slay_dragon"):
+            if k == "slay":
+                self.ensure_foes(max(1, int(v) - self.beat_kills))
+            self.dialogue.push("narrator", "They are done waiting. Steel answers steel.")
+        elif k == "search":
+            self.dialogue.push("narrator", "Something in this place rewards a closer look.")
+        elif k == "reach":
+            self.dialogue.push("narrator", "The way onward stands open. Nothing more waits here.")
+        elif k in ("item_get", "item_use"):
+            name = str(v)[:24]
+            if not self._has_item_like(name) and len(self.player.inventory) < 8:
+                self.player.inventory.append(Item(name, "It found its way to Kael's hands."))
+                self.sfx["pick"].play()
+                self.dialogue.push("narrator", f"Fate tips its hand: {name} is Kael's now.")
+                self.director.remember(
+                    f"The engine placed '{name}' in Kael's hands to keep the story "
+                    "moving — weave in how he came by it.")
+            elif k == "item_use":
+                self.dialogue.push("narrator", f"The {name} will not let Kael rest until used.")
+        elif k == "choice":
+            self.choices.set("The moment presses.", [str(v)[:70], "Not yet."])
+        self.director.remember(f"DRAMA MANAGER staged the trigger: {self._trigger_desc()}.")
+        self.director.request_tick("the trigger was staged", force=True)
+
+    def complete_beat(self):
         self.sfx["beat"].play()
         if self.beat < BEATS:
-            src = "the director advanced the story" if via_director else "objective completed"
             self.director.remember(
-                f"Beat {self.beat + 1} resolved ({src}): {self.story['beats'][self.beat]}")
+                f"Beat {self.beat + 1} resolved (its trigger fired): "
+                f"{self.story['beats'][self.beat]}")
             self.beat += 1
             self.stage.unlocked = min(len(self.stage.rooms), self.beat + 1)
             self.beat_started_t = pygame.time.get_ticks()
@@ -627,7 +733,14 @@ class Game:
                 opts = a.get("options", [])
                 if isinstance(opts, str):
                     opts = [o.strip() for o in opts.split("|") if o.strip()]
+                opts = [str(o) for o in opts if str(o).strip()]
                 if opts:
+                    # a `choice`-triggered beat always gets its pivotal line on
+                    # the panel, whether or not the DM remembered to include it
+                    if self.objective and self.objective.get("kind") == "choice":
+                        key = str(self.objective["value"])
+                        if not any(self._text_matches(o, key) for o in opts):
+                            opts = (opts[:3] + [key])  # panel caps at 4
                     self.choices.set(str(a.get("prompt", ""))[:120], opts)
             elif tool == "give_item":
                 name = str(a.get("name", "")).strip()[:24]
@@ -635,28 +748,24 @@ class Game:
                     self.player.inventory.append(Item(name, str(a.get("desc", ""))[:90]))
                     self.dialogue.push("narrator", f"Taken: {name}.")
                     self.sfx["pick"].play()
+                    self.mark_progress()  # an item arriving is story movement
             elif tool == "take_item":
                 if self.player.remove_item(str(a.get("name", ""))):
                     self.selected_item = None
             elif tool == "skill_check":
                 self.do_skill_check(a)
-            elif tool == "set_objective":
-                kind = a.get("kind")
-                if kind in ("slay", "search", "talk", "reach", "story") and self.beat < BEATS:
-                    value = a.get("value", 3)
-                    if kind in ("slay", "search"):
-                        value = max(1, min(8, int(float(value or 3))))
-                    self.objective = {"kind": kind, "value": value,
-                                      "text": str(a.get("text", ""))[:80] or "New purpose"}
-                    self.beat_kills = self.beat_searches = 0
-                    self.talked_this_beat = set()
-                    self.mark_progress()
-                    if kind == "slay":
-                        self.ensure_foes(value)
-            elif tool == "advance_beat":
-                self.complete_beat(via_director=True)
+            elif tool in ("advance_beat", "set_objective"):
+                # legacy calls from stale prompts: beats are trigger-gated now
+                self.director.remember(
+                    "REFUSED: beats complete only through their trigger. "
+                    f"Current trigger: {self._trigger_desc()}. Stage it instead.")
             elif tool == "end_story":
-                self.finish_payoff(str(a.get("text", "")))
+                if self.beat >= BEATS:
+                    self.finish_payoff(str(a.get("text", "")))
+                else:
+                    self.director.remember(
+                        "REFUSED end_story: the story is not in the payoff phase. "
+                        f"Current trigger: {self._trigger_desc()}.")
             elif tool == "spawn_encounter":
                 kind = a.get("kind") if a.get("kind") in ENEMY_KINDS else "raider"
                 for _ in range(max(1, min(4, int(float(a.get("count", 2)))))):
@@ -762,9 +871,7 @@ class Game:
         if self.choices.open:
             picked = self.choices.mouse(self.mouse, click)
             if picked:
-                self.dialogue.push("knight", picked)
-                self.director.remember(f'Kael chose: "{picked}"')
-                self.director.request_tick("the player made a choice", force=True)
+                self._on_choice_picked(picked)
             self.dialogue.update(dt)
             self.drain_director()
             return
@@ -809,6 +916,15 @@ class Game:
         self.check_progress()
         self.drain_director()
         self.update_snapshot(room_foes)
+
+    def _on_choice_picked(self, picked):
+        self.dialogue.push("knight", picked)
+        if self.objective and self.objective.get("kind") == "choice" \
+                and self._text_matches(picked, self.objective.get("value", "")):
+            self.beat_choice_done = True  # the beat's trigger fired
+            self.mark_progress()
+        self.director.remember(f'Kael chose: "{picked}"')
+        self.director.request_tick("the player made a choice", force=True)
 
     def drain_director(self):
         for call in self.director.drain():
@@ -902,6 +1018,9 @@ class Game:
                 item = self.player.inventory[self.selected_item]
                 self.selected_item = None
                 self.dialogue.push("narrator", f"You try the {item.name} on the {h.kind}...")
+                if self.objective and self.objective.get("kind") == "item_use" \
+                        and self._text_matches(item.name, self.objective.get("value", "")):
+                    self.beat_item_used = True  # the beat's trigger fired
                 self.mark_progress()
                 self.director.remember(
                     f"Kael USED the item '{item.name}' on the {h.kind} in {room.name}. "
@@ -1067,25 +1186,35 @@ class Game:
             beat_txt = "PAYOFF PHASE: " + self.story["payoff"]
             beat_lab = "payoff"
         frontier = self.stage.unlocked - 1
-        prog = {"slay": f"{self.beat_kills}/{o.get('value')}",
-                "search": f"{self.beat_searches}/{o.get('value')}",
+        prog = {"slay": f"{self.beat_kills}/{o.get('value')} kills",
+                "search": f"{self.beat_searches}/{o.get('value')} searches",
                 "talk": f"spoken to: {', '.join(self.talked_this_beat) or 'no one'}",
-                "reach": f"at room {self.stage.current}, frontier is {frontier}",
+                "reach": f"at room {self.stage.current}, frontier is room {frontier}",
+                "item_get": ("in inventory" if self._has_item_like(str(o.get("value")))
+                             else "not yet held"),
+                "item_use": "used" if self.beat_item_used else "not yet used",
+                "choice": "picked" if self.beat_choice_done else "not offered/picked yet",
                 }.get(o.get("kind"), "-")
-        # pacing the director can act on: how long this beat has run, whether it
-        # is stalling, and where we are on the rising arc
+        # beat status + trigger + pacing: everything the DM needs to steer.
+        # Beats are trigger-gated — the DM cannot advance them, only stage them.
         if self.beat < BEATS:
             age_s = self._beat_age() // 1000
             idle_s = (pygame.time.get_ticks() - self.progress_t) // 1000
-            stall = "  STALLING — push it or advance_beat!" if idle_s * 1000 > BEAT_STALL_MS else ""
-            tension = "rising" if self.beat < BEATS - 1 else "CLIMAX — head for the payoff"
-            pacing = (f"Pacing: beat running {age_s}s, {idle_s}s since anything moved."
-                      f"{stall} Arc tension: {tension} (beat {self.beat + 1}/{BEATS}).")
+            stall = "  STALLING — stage the trigger NOW." if idle_s * 1000 > BEAT_STALL_MS else ""
+            tension = "rising" if self.beat < BEATS - 1 else "CLIMAX — the payoff is next"
+            pacing = (
+                f"Beat status: {self.beat} done, beat {self.beat + 1} ONGOING, "
+                f"{BEATS - self.beat - 1} not started.\n"
+                f"TRIGGER (completes this beat; engine-detected, you cannot skip it): "
+                f"{self._trigger_desc()} — progress: {prog}.\n"
+                f"Pacing: beat running {age_s}s, {idle_s}s since anything moved."
+                f"{stall} Arc tension: {tension} (beat {self.beat + 1}/{BEATS}).")
         else:
             pay_s = ((pygame.time.get_ticks() - self.payoff_started_t) // 1000
                      if self.payoff_started_t else 0)
-            pacing = (f"Pacing: PAYOFF running {pay_s}s. Pay the promise and call "
-                      "end_story to land the ending.")
+            pacing = (f"Beat status: all {BEATS} done — PAYOFF running {pay_s}s "
+                      f"({self._trigger_desc()}, progress: {prog}). Pay the promise "
+                      "and call end_story to land the ending.")
         cast = []
         if self.princess_room == self.stage.current:
             cast.append("Maren")
@@ -1094,7 +1223,6 @@ class Game:
         inv = ", ".join(i.name for i in self.player.inventory) or "empty"
         self.snapshot_text = (
             f"Beat {beat_lab}: {beat_txt}\n"
-            f"Objective: {o.get('kind')} ({o.get('text')}), progress {prog}\n"
             f"Location: {room.name} ({room.style}), props: "
             f"{', '.join(h.kind for h in room.hotspots)}\n"
             f"Present: {', '.join(cast) or 'Kael alone'}. Foes here: "
@@ -1256,6 +1384,11 @@ class Game:
             for line in wrap(self.fonts.small, f"{i + 1}. {text}", IW - 78)[:2]:
                 s.blit(self.fonts.text(line, col), (52, y))
                 y += 10
+            if i == self.beat and self.beat < BEATS:  # what actually fires it
+                for line in wrap(self.fonts.small, "needs: " + self._trigger_desc(),
+                                 IW - 78)[:1]:
+                    s.blit(self.fonts.text(line, (170, 150, 90)), (52, y))
+                    y += 10
             y += 3
         if self.beat >= BEATS:
             col = (110, 160, 110) if self.payoff_done else (230, 220, 190)

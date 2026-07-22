@@ -12,6 +12,17 @@ from .trace import TRACE
 
 THEMES = ("forest", "castle", "volcano")
 SPEAKERS = ("knight", "princess", "dragon", "narrator")
+TRIGGER_TYPES = ("talk", "slay", "search", "reach", "item_get", "item_use", "choice")
+
+# When a story arrives without usable triggers (old saves, weak models),
+# this rotation keeps every beat deterministically completable.
+DEFAULT_TRIGGERS = [
+    {"type": "talk", "value": "princess"},
+    {"type": "search", "value": 3},
+    {"type": "slay", "value": 3},
+    {"type": "search", "value": 2},
+    {"type": "slay", "value": 4},
+]
 
 FALLBACK_STORIES = [
     {
@@ -28,6 +39,13 @@ FALLBACK_STORIES = [
         ],
         "payoff": "Kael's vengeance is standing beside him. He chooses who burns: the dragon, the princess, or the vow itself.",
         "dragon_role": "villain",
+        "triggers": [
+            {"type": "talk", "value": "princess"},
+            {"type": "slay", "value": 3},
+            {"type": "item_get", "value": "Cultist's Locket"},
+            {"type": "choice", "value": "Demand the truth from Maren"},
+            {"type": "talk", "value": "dragon"},
+        ],
         "opening_lines": [
             {"speaker": "narrator", "text": "The Thornwood keeps its dead. Kael intends to add some."},
             {"speaker": "princess", "text": "Walk faster, knight. The wood is patient and I am not."},
@@ -48,6 +66,13 @@ FALLBACK_STORIES = [
         ],
         "payoff": "Regicide or dragonslaying — the same sword stroke cannot be both loyal and just.",
         "dragon_role": "tragic",
+        "triggers": [
+            {"type": "slay", "value": 2},
+            {"type": "item_get", "value": "Captain's Sigil"},
+            {"type": "talk", "value": "dragon"},
+            {"type": "choice", "value": "Accuse Maren of poisoning the king"},
+            {"type": "talk", "value": "princess"},
+        ],
         "opening_lines": [
             {"speaker": "narrator", "text": "Castle Vael, midnight. The bells are ringing for a king three days dead."},
             {"speaker": "princess", "text": "They came into my bedchamber with knives, Ser Kael. I want them dead twice."},
@@ -68,6 +93,13 @@ FALLBACK_STORIES = [
         ],
         "payoff": "The promise breaks honestly: Kael saves what chooses to be saved, and the dragon repays her debt in fire.",
         "dragon_role": "ally",
+        "triggers": [
+            {"type": "talk", "value": "dragon"},
+            {"type": "slay", "value": 3},
+            {"type": "talk", "value": "princess"},
+            {"type": "item_get", "value": "The Dragon's Egg"},
+            {"type": "reach", "value": "next"},
+        ],
         "opening_lines": [
             {"speaker": "narrator", "text": "Mount Karrach has been singing for nine nights. Tonight it gets an answer."},
             {"speaker": "dragon", "text": "Little knight. Sheathe that or lose the arm. I need you breathing."},
@@ -98,8 +130,20 @@ Reply with ONLY this JSON object:
   "promise": "one or two sentences",
   "payoff": "one or two sentences",
   "beats": ["beat 1", "beat 2", "beat 3", "beat 4", "beat 5"],
+  "triggers": [{{"type": "...", "value": "..."}}, ... 5 items, one per beat],
   "opening_lines": [{{"speaker": "narrator|knight|princess|dragon", "text": "..."}}, ... 3 lines]
 }}
+
+TRIGGERS: triggers[i] is the ONE concrete in-game deed that completes beat i+1.
+The game engine detects it mechanically — beats cannot advance any other way,
+so make each trigger embody its beat. Types (pick a varied mix):
+- talk: value "princess" or "dragon" — the player speaks with them
+- slay: value 2-5 — that many kills
+- search: value 2-4 — that many places searched
+- reach: value "next" — the player walks into the newest-opened area (never beat 1)
+- item_get: value an item name — the player must come to hold it
+- item_use: value an item name — the player must use it on something
+- choice: value a short first-person line the player must pick in dialogue
 
 BE TERSE. Every beat is ONE sentence under 22 words, no "beat N:" prefixes.
 Promise, payoff and each opening line under 30 words. The whole reply must
@@ -108,6 +152,35 @@ stay under 300 words of content — punchy, not padded.
 
 
 import re
+
+
+def _valid_trigger(t, idx):
+    """Coerce one forged trigger into engine-detectable shape, or None."""
+    if not isinstance(t, dict):
+        return None
+    typ = str(t.get("type", "")).strip().lower()
+    val = t.get("value", "")
+    if typ not in TRIGGER_TYPES:
+        return None
+    if typ == "talk":
+        v = str(val).strip().lower()
+        return {"type": "talk",
+                "value": "dragon" if ("drag" in v or "vex" in v) else "princess"}
+    if typ in ("slay", "search"):
+        try:
+            n = int(float(val))
+        except (TypeError, ValueError):
+            n = 3
+        return {"type": typ, "value": max(1, min(6, n))}
+    if typ == "reach":
+        if idx == 0:  # nothing new is open during beat 1 — would fire instantly
+            return None
+        return {"type": "reach", "value": "next"}
+    if typ in ("item_get", "item_use"):
+        name = str(val).strip()[:24]
+        return {"type": typ, "value": name} if name else None
+    line = str(val).strip()[:70]  # choice
+    return {"type": "choice", "value": line} if line else None
 
 
 def _valid_story(d):
@@ -134,6 +207,11 @@ def _valid_story(d):
         if not s["payoff"]:
             return None
         s["dragon_role"] = d.get("dragon_role") if d.get("dragon_role") in ("villain", "ally", "tragic") else "villain"
+        raw_trigs = d.get("triggers") if isinstance(d.get("triggers"), list) else []
+        s["triggers"] = []
+        for i in range(len(s["beats"])):
+            vt = _valid_trigger(raw_trigs[i], i) if i < len(raw_trigs) else None
+            s["triggers"].append(vt or copy.deepcopy(DEFAULT_TRIGGERS[i % len(DEFAULT_TRIGGERS)]))
         lines = []
         for ln in d.get("opening_lines", []):
             if isinstance(ln, dict) and str(ln.get("text", "")).strip():
